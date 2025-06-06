@@ -30,6 +30,11 @@ type (
 	RaftConfig      = raft.Config
 )
 
+type StableStorer interface {
+	RaftStableStore
+	SnapshotsFilesPath() string
+}
+
 type NodeTransporter interface {
 	host.Host
 }
@@ -106,7 +111,7 @@ func NewLibP2pRaft(
 	} else {
 		stableStore = conf.StableStore
 		snapshotStore, err = raft.NewFileSnapshotStoreWithLogger(
-			conf.StableStore.SnapshotsPath(), 5, conf.Logger,
+			conf.StableStore.SnapshotsFilesPath(), 5, conf.Logger,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("consensus: failed to create snapshot store: %v", err)
