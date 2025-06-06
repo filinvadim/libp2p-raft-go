@@ -35,7 +35,7 @@ the networking layer by adding features like generic addressing, secure channels
 multiplexing over single connections or nat traversal in a standarized fashion.
 
 `libp2p-raft-go` uses Hashicorp's Raft implementation and provides a LibP2P-based network transport
-for it. At the same time, it wraps the whole system with an implementation of the `go-libp2p-consensus`
+for it. At the same time, it wraps the whole system with an implementation of the libp2p Raft consensus
 interface, ensuring any applications relying on it can easily swap it for a different one.
 
 In short, `libp2p-raft-go`:
@@ -43,7 +43,7 @@ In short, `libp2p-raft-go`:
 * can be used to implement raft-consensus-based systems
 * takes advantange of the libp2p features (secure channels, protocol multiplexing, nat transversal...)
 * takes advantage of Hashicorp's Raft implementation matureness and performance improvementes (pipelining)
-* forms a layer which can easily be replaced by a different `go-libp2p-consensus` implementation.
+* forms a layer which can easily be replaced by a different libp2p Raft consensus implementation.
 
 
 ## Install
