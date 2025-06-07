@@ -17,6 +17,7 @@ providing a libp2p network transport for it.
 - [Background](#background)
 - [Install](#install)
 - [Usage](#usage)
+- [Tests](#tests)
 - [Contribute](#contribute)
 - [License](#license)
 
