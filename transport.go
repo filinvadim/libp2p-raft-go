@@ -1,8 +1,9 @@
-package main
+package raft
 
 import (
 	"context"
 	"errors"
+	"fmt"
 	"github.com/hashicorp/raft"
 	gostream "github.com/libp2p/go-libp2p-gostream"
 	"github.com/libp2p/go-libp2p/core/network"
@@ -73,16 +74,22 @@ func (sl *streamLayer) Dial(address raft.ServerAddress, timeout time.Duration) (
 	if sl.host == nil {
 		return nil, errors.New("raft-transport: not initialized")
 	}
-	var pid peer.ID
+	var (
+		pid peer.ID
+		err error
+	)
 	value, ok := sl.cache.Load(string(address))
 	if ok {
 		pid = value.(peer.ID)
 	} else {
-		pid, _ = peer.IDFromBytes([]byte(address))
+		pid, err = peer.Decode(string(address))
+		if err != nil {
+			return nil, err
+		}
 		sl.cache.Store(string(address), pid)
 	}
 	if pid.String() == "" {
-		return nil, errors.New("raft-transport: invalid server id")
+		return nil, fmt.Errorf("raft-transport: invalid server id: %s", string(address))
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)

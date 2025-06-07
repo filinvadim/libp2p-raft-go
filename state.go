@@ -1,4 +1,4 @@
-package main
+package raft
 
 import (
 	"bytes"
@@ -12,11 +12,11 @@ import (
 
 var ErrStateNotInitialized = errors.New("FSM is not initialized")
 
-type KVState map[string]string
+type KVState map[string]string // the easiest and most understandable type of state
 
 type fsm struct {
 	state     *KVState
-	prevState KVState
+	prevState KVState // just in case of "fire"
 
 	mux *sync.Mutex
 
@@ -88,6 +88,7 @@ func (fsm *fsm) Apply(rlog *raft.Log) (result interface{}) {
 			if err != nil {
 				return err
 			}
+			// if it's only a validator - skip state update
 			if isValidatorApplied {
 				return fsm.state
 			}

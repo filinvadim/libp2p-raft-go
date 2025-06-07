@@ -1,4 +1,4 @@
-package main
+package raft
 
 import (
 	"errors"
@@ -27,6 +27,7 @@ type votersCache struct {
 	m     map[ServerID]voterTimed
 }
 
+// Voters cache helps to track voters, count them and prevent voters deletion from 'flapping'
 func newVotersCache() *votersCache {
 	pc := &votersCache{
 		mutex: new(sync.RWMutex),
@@ -42,7 +43,7 @@ func (d *votersCache) addVoter(key ServerID, srv Server) {
 	d.m[key] = voterTimed{srv, time.Now()}
 }
 
-var errTooSoonToRemoveVoter = errors.New("consensus:too soon to remove voter")
+var errTooSoonToRemoveVoter = errors.New("consensus: too soon to remove voter")
 
 func (d *votersCache) removeVoter(key ServerID) error {
 	d.mutex.Lock()

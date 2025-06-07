@@ -1,4 +1,4 @@
-package main
+package raft
 
 import (
 	"bytes"
@@ -50,21 +50,81 @@ type Transporter interface {
 }
 
 type Config struct {
-	HeartbeatTimeout, CommitTimeout, SnapshotInterval time.Duration
-	MaxAppendEntries, TrailingLogs, SnapshotThreshold uint64
-	FSM                                               FSMachiner
-	Codec                                             EncodeDecoder
-	StableStore                                       StableStorer
-	LogStore                                          LogStore
-	BootstrapNodes                                    []peer.AddrInfo
-	IsClusterInitiator                                bool
-	Logger                                            Logger
-	Validators                                        []ConsensusValidatorFunc
-	ValidationProtocolID                              protocol.ID
-	TransportFunc                                     NewTransportFunc
+	// HeartbeatTimeout specifies the time in follower state without contact
+	// from a leader before we attempt an election.
+	// Default: 5 sec
+	HeartbeatTimeout time.Duration
+	// CommitTimeout specifies the time without an Apply operation before the
+	// leader sends an AppendEntry RPC to followers, to ensure a timely commit of
+	// log entries.
+	// Due to random staggering, may be delayed as much as 2x this value.
+	// Default: 1 sec
+	CommitTimeout time.Duration
+	// SnapshotInterval controls how often we check if we should perform a
+	// snapshot. We randomly stagger between this value and 2x this value to avoid
+	// the entire cluster from performing a snapshot at once. The value passed
+	// here is the initial setting used. This can be tuned during operation using
+	// ReloadConfig.
+	// Default: 20 min
+	SnapshotInterval time.Duration
+	// MaxAppendEntries controls the maximum number of append entries
+	// to send at once. We want to strike a balance between efficiency
+	// and avoiding waste if the follower is going to reject because of
+	// an inconsistent log.
+	// Default: 128
+	MaxAppendEntries uint64
+	// TrailingLogs controls how many logs we leave after a snapshot. This is used
+	// so that we can quickly replay logs on a follower instead of being forced to
+	// send an entire snapshot. The value passed here is the initial setting used.
+	// This can be tuned during operation using ReloadConfig.
+	// Default: 256
+	TrailingLogs uint64
+	// SnapshotInterval controls how often we check if we should perform a
+	// snapshot. We randomly stagger between this value and 2x this value to avoid
+	// the entire cluster from performing a snapshot at once. The value passed
+	// here is the initial setting used. This can be tuned during operation using
+	// ReloadConfig.
+	// Default: 8192
+	SnapshotThreshold uint64
+	// FSM (finite state machine) is a crucial component used to maintain a consistent
+	// state across a distributed system of nodes. Raft uses a consensus algorithm to
+	// ensure all nodes in a cluster agree on the same sequence of state transitions,
+	// which is managed by the FSM.
+	// Default: NewFSM.
+	FSM FSMachiner
+	// Custom Marshaller: by default MessagePack (msgpack) is frequently used with Raft,
+	// a consensus algorithm, because of its efficiency as a binary serialization format,
+	// which is crucial for fast and reliable message passing in distributed systems.
+	// Raft nodes exchange messages that represent changes to the system's state, and
+	// MessagePack's compact nature and speed make it well-suited for this purpose
+	// Default: MessagePack V5
+	Codec EncodeDecoder
+	// StableStore is used to provide stable storage
+	// of key configurations to ensure safety.
+	// Default: in-memory store
+	StableStore StableStorer
+	// LogStore is used as db for storing
+	// and retrieving logs in a durable fashion.
+	// Default: in-memory store
+	LogStore LogStore
+	// Cluster predefined nodes
+	// Default: in-memory store
+	BootstrapNodes []peer.AddrInfo
+	// Set node as Raft bootstrap cluster initiator - only a single node can do that
+	// Default: false
+	IsClusterInitiator bool
+	// Logger.
+	// Default: DefaultConsensusLogger
+	Logger Logger
+	// any custom validators. Note that validators don't affect Raft state
+	Validators []ConsensusValidatorFunc
+	// LibP2P endpoint for Raft nodes to be able to transfer incoming state change requests to the cluster leader
+	LeaderProtocolID protocol.ID
+	// Custom transport: by default, it's LibP2P TCP streams
+	TransportFunc NewTransportFunc
 }
 
-type consensusService struct {
+type ConsensusService struct {
 	ctx context.Context
 
 	node  NodeTransporter
@@ -80,7 +140,7 @@ type consensusService struct {
 	bootstrapNodes []peer.AddrInfo
 
 	isClusterInitiator bool
-	validationEndpoint protocol.ID
+	leaderEndpoint     protocol.ID
 	codec              EncodeDecoder
 
 	syncMx *sync.RWMutex
@@ -93,14 +153,14 @@ type consensusService struct {
 func NewLibP2pRaft(
 	ctx context.Context,
 	conf *Config,
-) (_ *consensusService, err error) {
+) (_ *ConsensusService, err error) {
 	var (
 		stableStore   raft.StableStore
 		snapshotStore raft.SnapshotStore
 		logStore      raft.LogStore
 	)
 	if conf.Logger == nil {
-		conf.Logger = defaultConsensusLogger()
+		conf.Logger = DefaultConsensusLogger()
 	}
 	if conf.LogStore == nil {
 		logStore = raft.NewInmemStore()
@@ -141,6 +201,9 @@ func NewLibP2pRaft(
 	if conf.SnapshotThreshold == 0 {
 		conf.SnapshotThreshold = 8192
 	}
+	if conf.TransportFunc == nil {
+		conf.TransportFunc = newConsensusTransport
+	}
 
 	raftConfig := raft.DefaultConfig()
 	raftConfig.HeartbeatTimeout = conf.HeartbeatTimeout
@@ -150,19 +213,16 @@ func NewLibP2pRaft(
 	raftConfig.MaxAppendEntries = int(conf.MaxAppendEntries)
 	raftConfig.TrailingLogs = conf.TrailingLogs
 	raftConfig.Logger = conf.Logger
+	raftConfig.LocalID = ServerID("none")
 	raftConfig.NoLegacyTelemetry = true
 	raftConfig.SnapshotThreshold = conf.SnapshotThreshold
 	raftConfig.SnapshotInterval = conf.SnapshotInterval
 	raftConfig.NoSnapshotRestoreOnStart = true
-
 	if err := raft.ValidateConfig(raftConfig); err != nil {
 		return nil, err
 	}
 
-	if conf.TransportFunc == nil {
-		conf.TransportFunc = newConsensusTransport
-	}
-	return &consensusService{
+	return &ConsensusService{
 		ctx:                ctx,
 		logStore:           logStore,
 		stableStore:        stableStore,
@@ -176,12 +236,12 @@ func NewLibP2pRaft(
 		transportFunc:      conf.TransportFunc,
 		bootstrapNodes:     conf.BootstrapNodes,
 		isClusterInitiator: conf.IsClusterInitiator,
-		validationEndpoint: conf.ValidationProtocolID,
+		leaderEndpoint:     conf.LeaderProtocolID,
 		codec:              conf.Codec,
 	}, nil
 }
 
-func (c *consensusService) Start(node NodeTransporter) (err error) {
+func (c *ConsensusService) Start(node NodeTransporter) (err error) {
 	if c == nil {
 		return errors.New("consensus: nil consensus service")
 	}
@@ -192,7 +252,7 @@ func (c *consensusService) Start(node NodeTransporter) (err error) {
 	c.syncMx.Lock()
 	defer c.syncMx.Unlock()
 
-	c.raftID = ServerID(node.ID())
+	c.raftID = ServerID(node.ID().String())
 	c.config.LocalID = c.raftID
 
 	hasState, err := raft.HasExistingState(c.logStore, c.stableStore, c.snapshotStore)
@@ -200,6 +260,7 @@ func (c *consensusService) Start(node NodeTransporter) (err error) {
 		return fmt.Errorf("consensus: failed to check existing state: %v", err)
 	}
 
+	// the cluster doesn't already exist, and raft node has a status of an initiator
 	if !hasState && c.isClusterInitiator {
 		c.l.Info("consensus: setting up new cluster...")
 		if err := c.bootstrap(c.config.LocalID); err != nil {
@@ -225,10 +286,12 @@ func (c *consensusService) Start(node NodeTransporter) (err error) {
 		return fmt.Errorf("consensus: failed to create node: %w", err)
 	}
 
+	// wait cluster configuration to be updated
 	if err := c.waitClusterReady(); err != nil {
 		return err
 	}
 
+	// wait all nodes in cluster to be synced: leader elected and voters added
 	if err = c.sync(); err != nil {
 		return err
 	}
@@ -240,7 +303,8 @@ func (c *consensusService) Start(node NodeTransporter) (err error) {
 	return nil
 }
 
-func (c *consensusService) bootstrap(id ServerID) error {
+// bootstrap method set up new cluster
+func (c *ConsensusService) bootstrap(id ServerID) error {
 	raftConf := raft.Configuration{}
 	raftConf.Servers = append(raftConf.Servers, raft.Server{
 		Suffrage: raft.Voter,
@@ -271,7 +335,7 @@ func (c *consensusService) bootstrap(id ServerID) error {
 	return c.logStore.GetLog(1, &raft.Log{})
 }
 
-func (c *consensusService) waitClusterReady() error {
+func (c *ConsensusService) waitClusterReady() error {
 	clusterReadyChan := make(chan raft.ConfigurationFuture, 1)
 
 	timeoutTimer := time.NewTimer(time.Second * 10)
@@ -301,16 +365,18 @@ type consensusSync struct {
 	l      Logger
 }
 
-func (c *consensusService) sync() error {
+// sync is waiting own Raft node and other nodes to be up and running, having Leader or Followers status,
+// recognizing each other, syncing state and sharing snapshots.
+// You won't be able to run the cluster without that sync.
+func (c *ConsensusService) sync() error {
 	if c.raftID == "" {
 		return errors.New("consensus: node id is not initialized")
 	}
-
-	c.l.Info("consensus: waiting for sync...")
-
 	if c.ctx.Err() != nil {
 		return c.ctx.Err()
 	}
+
+	c.l.Info("consensus: waiting for sync...")
 
 	leaderCtx, leaderCancel := context.WithTimeout(context.Background(), time.Second*30)
 	defer leaderCancel()
@@ -322,6 +388,7 @@ func (c *consensusService) sync() error {
 		l:      c.l,
 	}
 
+	// find whose leader is the cluster
 	if err := cs.waitForLeader(leaderCtx); err != nil {
 		c.l.Warn("consensus: failed to wait for leadership sync: %v", err)
 		return err
@@ -331,9 +398,9 @@ func (c *consensusService) sync() error {
 	voterCtx, voterCancel := context.WithTimeout(context.Background(), time.Second*30)
 	defer voterCancel()
 
+	// sync own status. Am I a voter?
 	if err := cs.waitForVoter(voterCtx); err != nil {
-
-		c.l.Warn("consensus: waiting to become a voter: %v", err)
+		c.l.Warn("consensus: waiting to become a voter:", err)
 		return fmt.Errorf("consensus: waiting to become a voter: %w", err)
 	}
 	c.l.Info("consensus: node received voter status")
@@ -341,8 +408,9 @@ func (c *consensusService) sync() error {
 	updatesCtx, updatesCancel := context.WithTimeout(context.Background(), time.Minute)
 	defer updatesCancel()
 
+	// sync state
 	if err := cs.waitForUpdates(updatesCtx); err != nil {
-		c.l.Error("consensus: waiting for consensus updates: %v", err)
+		c.l.Error("consensus: waiting for consensus updates:", err)
 	}
 
 	c.l.Info("consensus: sync complete")
@@ -438,39 +506,56 @@ func isVoter(srvID ServerID, cfg raft.Configuration) bool {
 	return false
 }
 
-func (c *consensusService) AddVoter(info peer.AddrInfo) {
+func (c *ConsensusService) AddVoter(id ServerID) {
 	c.waitSync()
 
 	if c.raft == nil {
 		return
 	}
-	if info.ID.String() == "" {
+	if id == "" {
+		return
+	}
+
+	peerId, err := peer.Decode(string(id))
+	if err != nil {
+		c.l.Error("consensus: add voter: invalid peer ID", id, err)
+		return
+	}
+	addrInfo := c.node.Peerstore().PeerInfo(peerId)
+	// let's check if libp2p node of this voter is accessible
+	if err := c.node.Connect(c.ctx, addrInfo); err != nil {
+		c.l.Error("consensus: add voter: failed to connect to peer:", id, err)
 		return
 	}
 
 	if _, leaderId := c.raft.LeaderWithID(); c.raftID != leaderId {
+		// only leader can add voters
 		return
 	}
 
-	id := ServerID(info.ID.String())
-	addr := ServerAddress(info.ID.String())
+	c.l.Debug("consensus: add voter: leader ID is", id)
 
+	addr := ServerAddress(id)
+
+	// check if voter already exists, check cluster capacity
 	if _, err := c.cache.getVoter(id); errors.Is(err, errVoterNotFound) && c.cache.cap() >= MaxVotersNum {
-		c.l.Error("consensus: failed to add voted: max capacity reached")
+		c.l.Error("consensus: add voter: failed to add voted: max capacity reached")
 		return
 	}
 
+	// add voter to stable store
 	wait := c.raft.AddVoter(id, addr, 0, 30*time.Second)
 	if wait.Error() != nil {
-		c.l.Error("consensus: failed to add voted: %v", wait.Error())
+		c.l.Error("consensus: add voter: failed to add voted: ", wait.Error())
 		return
 	}
-	c.l.Debug("consensus: new voter added %s", info.ID.String()[len(info.ID.String())-6:])
+	c.l.Debug("consensus: new voter added:", id)
 
 	if _, err := c.cache.getVoter(id); errors.Is(err, errVoterNotFound) {
-		c.l.Info("consensus: new voter added %s", info.ID.String()[len(info.ID.String())-6:])
+		c.l.Info("consensus: new voter added: ", id)
 	}
 
+	// add voter to cache
 	c.cache.addVoter(id, raft.Server{ // this cache only prevents voter removal from flapping
 		Suffrage: raft.Voter,
 		ID:       id,
@@ -479,51 +564,67 @@ func (c *consensusService) AddVoter(info peer.AddrInfo) {
 	return
 }
 
-func (c *consensusService) RemoveVoter(id peer.AddrInfo) {
-	c.waitSync()
-
+// RemoveVoter manually removes a voter from a cluster
+func (c *ConsensusService) RemoveVoter(id ServerID) {
 	if c.raft == nil {
 		return
 	}
-	if id.String() == "" {
+	if id == "" {
 		return
 	}
+
+	c.waitSync()
 
 	if _, leaderId := c.raft.LeaderWithID(); c.raftID != leaderId {
+		// not a leader - not allowed to remove voter
 		return
 	}
 
-	err := c.cache.removeVoter(ServerID(id.String()))
-
-	if errors.Is(err, errTooSoonToRemoveVoter) {
-		c.l.Info("consensus: removing voter %s is too soon, abort", id.String()[len(id.String())-1:])
+	err := c.cache.removeVoter(id)
+	if errors.Is(err, errTooSoonToRemoveVoter) { // voter was fresh new - let's wait a bit and not remove it
+		c.l.Info("consensus: removing voter is too soon, abort: ", id)
 		return
 	}
-	c.l.Info("consensus: removing voter %s", id.String()[len(id.String())-1:])
+	c.l.Info("consensus: removing voter:", id)
 
-	wait := c.raft.RemoveServer(ServerID(id.String()), 0, 30*time.Second)
+	// remove voter from stable store - this is final
+	wait := c.raft.RemoveServer(id, 0, 30*time.Second)
 	if err := wait.Error(); err != nil {
-		c.l.Error("consensus: failed to remove node: %s", wait.Error())
+		c.l.Error("consensus: failed to remove node:", wait.Error())
 		return
 	}
 }
 
-func (c *consensusService) Stats() map[string]string {
+// Stats gives Raft node metrics
+func (c *ConsensusService) Stats() map[string]string {
 	return c.raft.Stats()
 }
 
-func (c *consensusService) LeaderID() ServerID {
+// ID retrieves current Raft node identificator
+func (c *ConsensusService) ID() ServerID {
+	if c.raft == nil {
+		return "none"
+	}
+	return c.raftID
+}
+
+// LeaderID retrieves current cluster leader
+func (c *ConsensusService) LeaderID() ServerID {
+	if c.raft == nil {
+		return "failed"
+	}
 	_, leaderId := c.raft.LeaderWithID()
 	return leaderId
 }
 
-func (c *consensusService) AskValidation(key, value string) ([]byte, error) {
+// AskValidation allows each node to request data validation from a Raft cluster leader
+func (c *ConsensusService) AskValidation(key, value string) ([]byte, error) {
 	c.l.Info("consensus: asking for validation ", key)
 	return c.validate(KVState{key: value})
 }
 
-func (c *consensusService) validate(newState KVState) ([]byte, error) {
-	if c.validationEndpoint == "" {
+func (c *ConsensusService) validate(newState KVState) ([]byte, error) {
+	if c.leaderEndpoint == "" {
 		return nil, errors.New("consensus: no validation libp2p protocol provided")
 	}
 	leaderId := c.LeaderID()
@@ -544,7 +645,7 @@ func (c *consensusService) validate(newState KVState) ([]byte, error) {
 		return nil, err
 	}
 
-	resp, err := stream(c.ctx, c.node, leaderPeerId, c.validationEndpoint, newState)
+	resp, err := stream(c.ctx, c.node, leaderPeerId, c.leaderEndpoint, newState)
 	if err != nil {
 		return nil, fmt.Errorf("consensus: leader verify stream: %w", err)
 	}
@@ -555,7 +656,8 @@ func (c *consensusService) validate(newState KVState) ([]byte, error) {
 	return resp, nil
 }
 
-func (c *consensusService) CommitState(newState KVState) (_ *KVState, err error) {
+// CommitState updates Raft cluster state - only leader can do that
+func (c *ConsensusService) CommitState(newState KVState) (_ *KVState, err error) {
 	c.waitSync()
 
 	if c.raft == nil {
@@ -596,7 +698,8 @@ func (c *consensusService) CommitState(newState KVState) (_ *KVState, err error)
 	return nil, fmt.Errorf("consensus: commit: failed: %v", returnedState)
 }
 
-func (c *consensusService) CurrentState() (*KVState, error) {
+// CurrentState retrieves last consensus state
+func (c *ConsensusService) CurrentState() (*KVState, error) {
 	c.waitSync()
 
 	if c.raft == nil {
@@ -607,11 +710,13 @@ func (c *consensusService) CurrentState() (*KVState, error) {
 	return currentState, nil
 }
 
-func (c *consensusService) waitSync() {
+// just semaphore
+func (c *ConsensusService) waitSync() {
 	c.syncMx.RLock()
 	c.syncMx.RUnlock()
 }
 
+// just a dummy structure to prevent failed subscription panic
 type dummySubscription struct {
 	ch chan interface{}
 }
@@ -632,7 +737,10 @@ func (d *dummySubscription) Name() string {
 	return "dummy"
 }
 
-func (c *consensusService) runLeadershipExpiration() {
+// Raft cluster safety measure: libp2p node behind NAT if it's leader could cause whole cluster
+// to be inaccessible.
+// Constant leader changing to prevent single node overburdened
+func (c *ConsensusService) runLeadershipExpiration() {
 	c.waitSync()
 
 	time.Sleep(time.Minute * 5)
@@ -686,7 +794,7 @@ func (c *consensusService) runLeadershipExpiration() {
 	}
 }
 
-func (c *consensusService) dropLeadership(reason string) {
+func (c *ConsensusService) dropLeadership(reason string) {
 	if c == nil || c.raft == nil {
 		return
 	}
@@ -708,7 +816,7 @@ func (c *consensusService) dropLeadership(reason string) {
 	)
 }
 
-func (c *consensusService) Shutdown() {
+func (c *ConsensusService) Shutdown() {
 	if c == nil || c.raft == nil {
 		return
 	}

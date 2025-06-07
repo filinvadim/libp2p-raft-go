@@ -1,4 +1,4 @@
-package main
+package raft
 
 import (
 	"github.com/hashicorp/go-hclog"
@@ -10,21 +10,20 @@ import (
 	"strings"
 )
 
-const systemName = "raft"
+const RaftLogSystemName = "libp2p-raft"
 
-var raftLogger = golog.Logger(systemName)
+var raftLogger = golog.Logger(RaftLogSystemName)
 
 type Logger interface {
 	hclog.Logger
 }
 
 type consensusLogger struct {
-	l                               *golog.ZapEventLogger
-	name                            string
-	decodeCount, failedRequestCount int
+	l    *golog.ZapEventLogger
+	name string
 }
 
-func defaultConsensusLogger() *consensusLogger {
+func DefaultConsensusLogger() *consensusLogger {
 	return &consensusLogger{
 		l: raftLogger,
 	}
@@ -52,25 +51,7 @@ func (c *consensusLogger) Warn(msg string, args ...interface{}) {
 }
 
 func (c *consensusLogger) Error(msg string, args ...interface{}) {
-	if strings.Contains(msg, "failed to take snapshot") {
-		return
-	}
-	if strings.Contains(msg, "failed to make requestVote RPC") && c.failedRequestCount < 10 {
-		c.failedRequestCount++
-		return
-	}
-	if strings.Contains(msg, "failed to heartbeat") && c.failedRequestCount < 10 {
-		c.failedRequestCount++
-		return
-	}
-
-	if strings.Contains(msg, "failed to decode incoming command") && c.decodeCount < 3 {
-		c.decodeCount++
-		return
-	}
 	c.l.Errorln(msg, args)
-	c.decodeCount = 0
-	c.failedRequestCount = 0
 }
 
 func (c *consensusLogger) IsTrace() bool {
@@ -98,7 +79,7 @@ func (c *consensusLogger) ImpliedArgs() []interface{} {
 }
 
 func (c *consensusLogger) With(args ...interface{}) hclog.Logger {
-	gl := golog.Logger(systemName)
+	gl := golog.Logger(RaftLogSystemName)
 	gl.SugaredLogger = *gl.With(args)
 
 	return &consensusLogger{l: gl, name: c.name}

@@ -48,11 +48,15 @@ In short, `libp2p-raft-go`:
 
 ## Install
 
-`libp2p-raft-go` works like a regular Go library and uses Go modules for depdendency management:
+`libp2p-raft-go` works like a regular Go library and uses Go modules for depedendency management:
 
 ## Usage
 
-    TODO
+https://github.com/filinvadim/libp2p-raft-go/blob/master/example/main.go#L86-L217
+
+## Tests
+
+No unit tests are applicable here. Codebase was tested in production.
 
 ## Contribute
 
