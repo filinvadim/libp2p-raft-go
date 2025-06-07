@@ -25,8 +25,8 @@ import (
 )
 
 func init() {
-	_ = golog.SetLogLevel(raft.RaftLogSystemName, "error")
-	_ = golog.SetLogLevel("basichost", "error")
+	_ = golog.SetLogLevel(raft.RaftLogSystemName, "panic")
+	_ = golog.SetLogLevel("basichost", "panic")
 }
 
 // must be static and deterministic addresses
@@ -172,9 +172,9 @@ func main() {
 			// leader commits new state - only leader can do that
 			newState, err := n.CommitState(map[string]string{"hello": "world"})
 			if err != nil {
-				log.Printf("leader node %d: commit state error: %v", i, err)
+				log.Printf("leader node %d: commit state error: %v\n", i, err)
 			} else {
-				fmt.Printf("leader node %d: committed new state: %v", i, newState)
+				fmt.Printf("leader node %d: committed new state: %v\n", i, newState)
 			}
 		}
 	}
@@ -209,14 +209,16 @@ func main() {
 			state3Len := len(*newState3)
 			// is it still empty?
 			if state2Len != 0 && state3Len != 0 {
-				fmt.Println("following nodes updated state:", newState2, newState3)
+				fmt.Println("node2 and node3 state:", newState2, newState3)
+				fmt.Println()
+				fmt.Println("following nodes updated state successfully!")
 				return
 			}
 		}
 	}
 }
 
-// GenerateKeyFromSeed is a helper function that allow to create deterministic peer ID
+// GenerateKeyFromSeed is a helper function that allows to create deterministic peer ID
 func GenerateKeyFromSeed(seed []byte) (ed25519.PrivateKey, error) {
 	if len(seed) == 0 {
 		return nil, errors.New("seed is empty")

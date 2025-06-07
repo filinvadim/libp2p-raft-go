@@ -499,7 +499,7 @@ func (c *consensusSync) waitForUpdates(ctx context.Context) error {
 
 func isVoter(srvID ServerID, cfg raft.Configuration) bool {
 	for _, server := range cfg.Servers {
-		if server.ID == srvID && server.Suffrage == raft.Voter {
+		if server.ID == srvID && (server.Suffrage == raft.Voter || server.Suffrage == raft.Nonvoter) {
 			return true
 		}
 	}
@@ -540,6 +540,7 @@ func (c *ConsensusService) AddVoter(id ServerID) {
 	// check if voter already exists, check cluster capacity
 	if _, err := c.cache.getVoter(id); errors.Is(err, errVoterNotFound) && c.cache.cap() >= MaxVotersNum {
 		c.l.Error("consensus: add voter: failed to add voted: max capacity reached")
+		c.raft.AddNonvoter(id, addr, 0, 30*time.Second)
 		return
 	}
 
@@ -585,10 +586,14 @@ func (c *ConsensusService) RemoveVoter(id ServerID) {
 		c.l.Info("consensus: removing voter is too soon, abort: ", id)
 		return
 	}
+	if errors.Is(err, errVoterNotFound) { // was already demoted
+		c.raft.RemoveServer(id, 0, 30*time.Second) // remove completely
+		return
+	}
 	c.l.Info("consensus: removing voter:", id)
 
 	// remove voter from stable store - this is final
-	wait := c.raft.RemoveServer(id, 0, 30*time.Second)
+	wait := c.raft.DemoteVoter(id, 0, 30*time.Second)
 	if err := wait.Error(); err != nil {
 		c.l.Error("consensus: failed to remove node:", wait.Error())
 		return
