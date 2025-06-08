@@ -25,7 +25,7 @@ const (
 
 type NewTransportFunc func(node NodeTransporter, l Logger) (*raft.NetworkTransport, error)
 
-func newConsensusTransport(node NodeTransporter, l Logger) (*raft.NetworkTransport, error) {
+func NewConsensusTransport(node NodeTransporter, l Logger) (*raft.NetworkTransport, error) {
 	p2pStream, err := newStreamLayer(node)
 	if err != nil {
 		return nil, err

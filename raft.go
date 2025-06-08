@@ -202,7 +202,7 @@ func NewLibP2pRaft(
 		conf.SnapshotThreshold = 8192
 	}
 	if conf.TransportFunc == nil {
-		conf.TransportFunc = newConsensusTransport
+		conf.TransportFunc = NewConsensusTransport
 	}
 
 	raftConfig := raft.DefaultConfig()
