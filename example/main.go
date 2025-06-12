@@ -67,12 +67,11 @@ func rubLibp2pNode(port int) (host.Host, error) {
 }
 
 func runRaftNode(node host.Host, isInitiator bool, addrInfos []peer.AddrInfo) (*raft.ConsensusService, error) {
-	config := &raft.Config{
-		IsClusterInitiator: isInitiator,
-		BootstrapNodes:     addrInfos,
-	}
-
-	raftNode, err := raft.NewLibP2pRaft(context.Background(), config)
+	raftNode, err := raft.NewLibP2pRaft(
+		context.Background(),
+		raft.WithClusterInitiator(isInitiator),
+		raft.WithBootstrapNodes(addrInfos),
+	)
 	if err != nil {
 		return nil, err
 	}
